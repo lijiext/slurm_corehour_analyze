@@ -7,7 +7,7 @@ use Time::Piece;
 use Time::Seconds;
 
 # 初始化日志文件
-my $log_file = "slurm_core_usage_analyze.log";
+my $log_file = "/tmp/th3_core_usage_analyze.log";
 open my $log_fh, '>>', $log_file or die "Could not open log file '$log_file' $!\n";
 select((select($log_fh), $| = 1)[0]);  # 使日志文件句柄立即刷新
 
@@ -33,7 +33,7 @@ sub log_msg {
     sub new {
         my ($class) = @_;
         my $self = {
-            total_start_date       => '2022-01-01',
+            total_start_date       => '2024-01-01',
             end_date               => strftime('%Y-%m-%d', localtime),
             report_days            => 7,
             sacct_output_file      => '',
@@ -65,10 +65,32 @@ sub log_msg {
         my ($self) = @_;
         my $sacct_format_fields = "JobName,User,Partition,Nodelist,Start,End,State,CPUTimeRAW,JobID";
         my $end_datetime = $self->{end_date} . "T23:59:59"; # 结束时间设为当天的23:59:59
-        my $sacct_command = "sacct -S $self->{total_start_date} -E $end_datetime --format $sacct_format_fields -n -P > $self->{sacct_output_file}";
-        main::log_msg("INFO", "Running sacct command: $sacct_command");
-        system($sacct_command) == 0 or die "Failed to run sacct command: $!\n";
-        main::log_msg("INFO", "sacct command completed, data stored in $self->{sacct_output_file}");
+
+        # 分段执行sacct命令
+        my $start_date = Time::Piece->strptime($self->{total_start_date}, "%Y-%m-%d");
+        my $end_date = Time::Piece->strptime($self->{end_date}, "%Y-%m-%d");
+        my $interval = ONE_DAY * 90;  # 每次查询7天
+
+        open my $out_fh, '>', $self->{sacct_output_file} or die "Could not open '$self->{sacct_output_file}' $!\n";
+        while ($start_date < $end_date) {
+            my $current_end_date = $start_date + $interval;
+            $current_end_date = $end_date if $current_end_date > $end_date;
+
+            my $sacct_command = "sacct -S " . $start_date->ymd . "T00:00:00 -E " . $current_end_date->ymd . "T23:59:59 --format $sacct_format_fields -n -P";
+            main::log_msg("INFO", "Running sacct command: $sacct_command");
+
+            my $output = `$sacct_command`;
+            if ($? != 0) {
+                main::log_msg("ERROR", "Failed to run sacct command: $sacct_command");
+                die "Failed to run sacct command: $sacct_command\n";
+            }
+
+            print $out_fh $output;
+            main::log_msg("INFO", "sacct command completed for period " . $start_date->ymd . " to " . $current_end_date->ymd);
+
+            $start_date = $current_end_date + ONE_DAY;  # 移动到下一个时间段
+        }
+        close $out_fh;
     }
 
     sub load_sacct_data {
@@ -164,13 +186,12 @@ sub log_msg {
 
 # 主程序
 my $report_generator = ReportGenerator->new();
-main::log_msg("INFO", "========CORE/HOUR USAGE ANALYZE START========");
 $report_generator->parse_arguments();
 $report_generator->initialize_files();
 $report_generator->run_sacct_command();
 $report_generator->load_sacct_data();
 $report_generator->process_data();
 $report_generator->generate_report();
-main::log_msg("INFO", "========CORE/HOUR USAGE ANALYZE END========");
+
 # 关闭日志文件句柄
 close $log_fh;
